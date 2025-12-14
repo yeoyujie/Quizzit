@@ -1,0 +1,10 @@
+[project]
+name = "quizzit"
+version = "0.1.0"
+description = "Telegram bot"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+	"python-telegram-bot>=21.7",
+	"python-dotenv>=1.0.1",
+]
