@@ -396,16 +396,6 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if submitted not in expected_values:
         logger.info(
             f"Incorrect answer by {user_info} in chat {update.effective_chat.id}")
-        try:
-            result = await context.bot.set_message_reaction(
-                chat_id=message.chat_id,
-                message_id=message.message_id,
-                reaction=[ReactionTypeEmoji("👎")]
-            )
-            logger.info(f"Reaction API returned: {result}")
-        except Exception as e:
-            logger.info(f"Could not set reaction: {e}")
-        return
 
     user = update.effective_user
     user_id = user.id if user else None
