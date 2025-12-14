@@ -1,14 +1,17 @@
 import asyncio
 import json
 import logging
+import math
 import random
 from pathlib import Path
+from time import monotonic
 
 from config import load_config
 from typing import Optional
 from telegram.error import BadRequest
 from telegram import Update, Message, ReactionTypeEmoji
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
@@ -17,11 +20,124 @@ logging.getLogger("telegram").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 QUESTIONS_FILE = Path(__file__).resolve().parent.parent / "questions.json"
+HINT_POINT_STEPS = [
+    {"time": 6, "ratio": 0.0, "points": 5},
+    {"time": 12, "ratio": 0.2, "points": 4},
+    {"time": 18, "ratio": 0.4, "points": 3},
+    {"time": 24, "ratio": 0.6, "points": 2},
+]
+FINAL_REVEAL_TIME = 30
+MIN_POINTS = 1
+
+
+def _cancel_hint_tasks(chat_data: dict) -> None:
+    tasks: list[asyncio.Task] = chat_data.pop("hint_tasks", [])
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    chat_data.pop("hint_state", None)
+
+
+def _schedule_hints(update: Update, answer: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE, chat_data: dict) -> None:
+    """Schedule timed hint reveals while the question is active."""
+    _cancel_hint_tasks(chat_data)
+    qid = chat_data.get("current_qid", 0)
+    indices = [i for i, ch in enumerate(answer) if not ch.isspace()]
+    chat_data["hint_state"] = {
+        "qid": qid,
+        "revealed": set(),
+        "indices": indices,
+        "answer": answer,
+    }
+    chat_data["current_points"] = HINT_POINT_STEPS[0]["points"] if HINT_POINT_STEPS else MIN_POINTS
+
+    async def _reveal(delay: int, ratio: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+            state = chat_data.get("hint_state")
+            if not state or chat_data.get("answered") or state.get("qid") != qid:
+                return
+
+            indices_local: list[int] = state["indices"]
+            revealed: set[int] = state["revealed"]
+            target = math.ceil(len(indices_local) * ratio)
+            if target > len(revealed):
+                remaining = [i for i in indices_local if i not in revealed]
+                add_count = min(len(remaining), target - len(revealed))
+                if add_count > 0:
+                    revealed.update(random.sample(remaining, k=add_count))
+
+            hint = _build_progressive_hint(answer, revealed)
+            await context.bot.send_message(chat_id=chat_id, text=f"Hint: {hint}")
+            # Drop points in lockstep with this hint
+            chat_data["current_points"] = next(
+                (step["points"]
+                 for step in HINT_POINT_STEPS if step["time"] == delay),
+                chat_data.get("current_points", MIN_POINTS),
+            )
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.warning(f"Failed to send hint: {e}")
+
+    async def _auto_reveal(delay: int) -> None:
+        try:
+            await asyncio.sleep(delay)
+            state = chat_data.get("hint_state")
+            if not state or chat_data.get("answered") or state.get("qid") != qid:
+                return
+            chat_data["answered"] = True
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"No one guessed! The correct answer is {answer}",
+            )
+            wait_seconds = context.bot_data.get("QUIZ_DELAY_SECONDS", 0)
+            if wait_seconds > 0:
+                try:
+                    msg = await context.bot.send_message(chat_id=chat_id, text="Next question loading...")
+                    await run_countdown(message=msg, seconds=wait_seconds)
+                except Exception:
+                    pass
+            chat_data["index"] = chat_data.get("index", 0) + 1
+            await _send_question(update, context)
+        except asyncio.CancelledError:
+            return
+        except Exception as e:
+            logger.warning(f"Auto reveal failed: {e}")
+
+    chat_data["hint_tasks"] = [
+        *[
+            asyncio.create_task(_reveal(step["time"], step["ratio"]))
+            for step in HINT_POINT_STEPS
+        ],
+        asyncio.create_task(_auto_reveal(FINAL_REVEAL_TIME)),
+    ]
 
 
 def _normalize(text: str) -> str:
     """Lowercase and trim for lenient answer matching."""
     return text.strip().lower()
+
+
+def _points_for_elapsed(seconds: float) -> int:
+    """Return points based on elapsed time thresholds."""
+    for step in HINT_POINT_STEPS:
+        if seconds <= step["time"]:
+            return step["points"]
+    return MIN_POINTS
+
+
+def _build_progressive_hint(answer: str, revealed: set[int]) -> str:
+    """Reveal letters at given indices and space separate hidden characters."""
+    masked = []
+    for idx, ch in enumerate(answer):
+        if ch.isspace():
+            masked.append("  ")
+        elif idx in revealed:
+            masked.append(ch)
+        else:
+            masked.append("_ ")
+    return "".join(masked).strip()
 
 
 def _record_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -67,10 +183,12 @@ def _load_questions() -> list[dict]:
 
 async def _send_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_data = context.chat_data
+    _cancel_hint_tasks(chat_data)
     questions: list[dict] = chat_data["questions"]
     idx = chat_data.get("index", 0) % len(questions)
     chat_data["index"] = idx
     chat_data["answered"] = False
+    chat_data["current_qid"] = chat_data.get("current_qid", 0) + 1
 
     qdata = questions[idx]
     question = qdata.get("question", "")
@@ -85,7 +203,7 @@ async def _send_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     file_path = qdata.get("file")
     if file_path and q_type in {"image", "audio", "video"}:
-        asset_path = QUESTIONS_FILE.parent / file_path
+        asset_path = Path(file_path)
         try:
             with asset_path.open("rb") as fh:
                 if q_type == "image":
@@ -98,6 +216,10 @@ async def _send_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             logger.warning(f"Failed to send asset {asset_path}: {e}")
 
     await context.bot.send_message(chat_id=update.effective_chat.id, text=f"{question}")
+
+    chat_data["question_start_ts"] = monotonic()
+    _schedule_hints(update, qdata.get("answer", ""),
+                    update.effective_chat.id, context, chat_data)
 
 
 async def run_countdown(
@@ -254,7 +376,8 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     idx = chat_data.get("index", 0) % len(questions)
     if chat_data.get("answered"):
         logger.info(
-            f"Ignoring answer. Question already answered in chat {update.effective_chat.id}")
+            f"Ignoring answer. Question already answered in chat {update.effective_chat.id}"
+        )
         return
 
     current = questions[idx]
@@ -287,23 +410,26 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user = update.effective_user
     user_id = user.id if user else None
     name = user.full_name if user else "Player"
+    _cancel_hint_tasks(chat_data)
+    start_ts = chat_data.get("question_start_ts")
+    now_ts = monotonic()
+    elapsed = max(0.0, now_ts - start_ts) if start_ts else 0.0
+    points = chat_data.get("current_points")
+
+    if points is None:
+        points = _points_for_elapsed(elapsed)
+
     context.bot_data[user_id] = name
     scores = chat_data.setdefault("scores", {})
-
-    # Initialize the user's score if it doesn't exist
-    if user_id not in scores:
-        scores[user_id] = 0
-
-    # Increment the user's score
-    scores[user_id] += 1
-
+    scores[user_id] = scores.get(user_id, 0) + points
     chat_data["answered"] = True
     logger.info(
-        f"Correct answer by user {user_id} in chat {update.effective_chat.id}; score now {scores[user_id]}")
+        f"Correct answer by user {user_id} in chat {update.effective_chat.id}; score now {scores[user_id]}"
+    )
 
     wait_seconds = context.bot_data.get("QUIZ_DELAY_SECONDS", 0)
     await message.reply_text(
-        f"*{answer}* is correct!\n\n{name} *+1*",
+        f"*{answer}* is correct!\n\n{name} *+{points}* (answered in {elapsed:.1f}s)",
         parse_mode="Markdown"
     )
     await run_countdown(
