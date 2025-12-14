@@ -16,6 +16,7 @@ from src.commands.utils import (
     record_user,
     countdown_timer,
 )
+from src.commands.scores import show_scores
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,14 @@ def _load_questions() -> list[dict]:
         return json.load(fh)
 
 
+def _get_quiz_data(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    return context.chat_data.setdefault("quiz", {})
+
+
+def _clear_quiz_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    context.chat_data.pop("quiz", None)
+
+
 def _normalize(text: str) -> str:
     """Lowercase and trim for lenient answer matching."""
     return text.strip().lower()
@@ -54,12 +63,7 @@ def _cancel_pending_tasks(chat_data: dict) -> None:
 
 
 def _reset_question_state(chat_data: dict, next_index: int) -> int:
-    """
-    Reset all per-question state atomically and return the new generation ID.
-
-    Returns:
-        The new generation ID for this question session.
-    """
+    """Reset all per-question state atomically and return the new generation ID."""
     _cancel_pending_tasks(chat_data)
     generation = chat_data.get("generation", 0) + 1
 
@@ -133,7 +137,6 @@ async def _send_question_media_with_caption(
     media_type: str,
     caption: str
 ) -> None:
-    """Send media (image/audio/video) with caption."""
     try:
         with asset_path.open("rb") as fh:
             if media_type == "image":
@@ -233,15 +236,21 @@ async def send_question(
     next_index: Optional[int] = None,
 ) -> None:
     """Send the next question to the chat."""
-    chat_data = context.chat_data
     chat_id = update.effective_chat.id
-    questions: list[dict] = chat_data["questions"]
+    quiz = _get_quiz_data(context)
+    questions: list[dict] = quiz["questions"]
 
     if next_index is None:
-        next_index = chat_data.get("index", 0)
-    idx = next_index % len(questions)
+        next_index = quiz.get("index", 0)
 
-    generation = _reset_question_state(chat_data, idx)
+    if next_index >= len(questions):
+        await show_scores(update, context, force=True)
+        _clear_quiz_state(context)
+        return
+
+    idx = next_index
+
+    generation = _reset_question_state(quiz, idx)
 
     logger.info(
         f"Sending question {idx + 1} (gen={generation}) to chat {chat_id}")
@@ -265,16 +274,16 @@ async def send_question(
                 chat_id=chat_id, text=full_message, parse_mode="Markdown"
             )
 
-        chat_data["question_start_ts"] = monotonic()
-        chat_data["accepting_answers"] = True
-        _schedule_hints(update, context, chat_data,
+        quiz["question_start_ts"] = monotonic()
+        quiz["accepting_answers"] = True
+        _schedule_hints(update, context, quiz,
                         chat_id, answer, generation)
 
         logger.info(f"Question {idx + 1} sent successfully to chat {chat_id}")
 
     except Exception as e:
         logger.warning(f"Failed to send question {idx + 1}: {e}")
-        chat_data["answered"] = True
+        quiz["answered"] = True
 
 
 # -----------------------------------------------------------------------------
@@ -290,10 +299,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     questions = _load_questions()
     logger.info(f"Loaded {len(questions)} questions from {QUESTIONS_FILE}")
 
-    context.chat_data["questions"] = questions
-    context.chat_data["index"] = 0
-    context.chat_data["scores"] = {}
-    context.chat_data["answered"] = False
+    # Store all quiz state under a single `quiz` namespace
+    context.chat_data["quiz"] = {
+        "questions": questions,
+        "index": 0,
+        "scores": {},
+        "answered": False,
+    }
 
     start_message = (
         "🎊 *QUIZ TIME!* 🎊\n\n"
@@ -321,13 +333,13 @@ async def hint(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not user:
         return
 
-    chat_data = context.chat_data
-    questions: list[dict] = chat_data.get("questions")
+    quiz = context.chat_data.get("quiz", {})
+    questions: list[dict] = quiz.get("questions")
     if not questions:
         await update.message.reply_text("Quiz not started here. Send /start to begin.")
         return
 
-    idx = chat_data.get("index", 0) % len(questions)
+    idx = quiz.get("index", 0) % len(questions)
     try:
         await _send_hint_dm(user.id, idx, questions[idx], context)
     except Exception:
@@ -337,23 +349,22 @@ async def hint(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle user answers in the group chat."""
     message = update.message
     if not message or not message.text:
         return
 
     record_user(update, context)
 
-    chat_data = context.chat_data
-    questions: list[dict] = chat_data.get("questions")
+    quiz = context.chat_data.get("quiz", {})
+    questions: list[dict] = quiz.get("questions")
     if not questions:
         logger.info(
             f"Received answer but no quiz state for chat {update.effective_chat.id}")
         await message.reply_text("Quiz not started here. Send /start to begin.")
         return
 
-    idx = chat_data.get("index", 0) % len(questions)
-    if not _is_accepting_answers(chat_data):
+    idx = quiz.get("index", 0) % len(questions)
+    if not _is_accepting_answers(quiz):
         logger.info(
             f"Ignoring answer. Not accepting answers in chat {update.effective_chat.id}")
         return
@@ -382,17 +393,17 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     name = user.full_name if user else "Player"
 
     # Mark answered immediately to prevent race conditions
-    chat_data["answered"] = True
-    _cancel_pending_tasks(chat_data)
+    quiz["answered"] = True
+    _cancel_pending_tasks(quiz)
 
     # Calculate score
-    start_ts = chat_data.get("question_start_ts")
+    start_ts = quiz.get("question_start_ts")
     now_ts = monotonic()
     elapsed = max(0.0, now_ts - start_ts) if start_ts else 0.0
-    points = chat_data.get("current_points") or _points_for_elapsed(elapsed)
+    points = quiz.get("current_points") or _points_for_elapsed(elapsed)
 
     context.bot_data[user_id] = name
-    scores = chat_data.setdefault("scores", {})
+    scores = quiz.setdefault("scores", {})
     scores[user_id] = scores.get(user_id, 0) + points
     logger.info(
         f"Correct answer by user {user_id} in chat {update.effective_chat.id}; "

@@ -5,19 +5,24 @@ from src.commands.utils import require_group, require_admin
 
 
 @require_group
-async def show_scores(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Display the current leaderboard with team and individual scores."""
-    if not await require_admin(update, context):
+async def show_scores(update: Update, context: ContextTypes.DEFAULT_TYPE, force: bool = False) -> None:
+    """Display the current leaderboard with team and individual scores.
+
+    Args:
+        force: If True, bypass the admin check
+    """
+    if not force and not await require_admin(update, context):
         return
 
-    scores: dict = context.chat_data.get("scores", {})
+    quiz = context.chat_data.get("quiz", {})
+    scores: dict = quiz.get("scores", {})
     if not scores:
         await update.message.reply_text(
             "No scores yet. Answer a question to get on the board."
         )
         return
 
-    teams = context.chat_data.get("teams", {})
+    teams = quiz.get("teams", {})
 
     name_map = {
         "A": context.bot_data.get("TEAM_NAME_A", "A"),
@@ -42,7 +47,7 @@ async def show_scores(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     for label, pts in sorted(team_scores.items(), key=lambda item: item[1], reverse=True):
         team_lines.append(f"Team {name_map.get(label, label)}: {pts} pts")
 
-    # Individual scores with medals
+    # Calculate individual scores
     medals = {0: "🥇", 1: "🥈", 2: "🥉"}
     entries = []
     for idx, (user_id, points) in enumerate(

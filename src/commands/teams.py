@@ -19,8 +19,8 @@ async def split_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not await require_admin(update, context):
         return
 
-    # Always reset previous teams and reshuffle
-    context.chat_data.pop("teams", None)
+    quiz = context.chat_data.setdefault("quiz", {})
+    quiz.pop("teams", None)
     players = context.chat_data.get("players", {})
 
     if len(players) < 2:
@@ -37,7 +37,7 @@ async def split_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     mid = len(pairs) // 2
     team_a = pairs[:mid]
     team_b = pairs[mid:]
-    context.chat_data["teams"] = {"A": team_a, "B": team_b}
+    quiz["teams"] = {"A": team_a, "B": team_b}
 
     board = [
         "Teams reshuffled!",
@@ -52,7 +52,8 @@ async def show_teams(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not await require_admin(update, context):
         return
 
-    teams = context.chat_data.get("teams")
+    quiz = context.chat_data.get("quiz", {})
+    teams = quiz.get("teams")
     if not teams:
         await update.message.reply_text(
             "No teams yet. Use /group to split the current players."
