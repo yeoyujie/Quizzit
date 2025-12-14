@@ -12,7 +12,8 @@ def load_config() -> dict:
     delay = int(os.getenv("QUIZ_DELAY_SECONDS", "10"))
     admin_id = os.getenv("ADMIN_USER_ID")
     admin_id = int(admin_id) if admin_id else None
-    # Configurable team names (defaults: A / B)
+
+    # Configurable team names
     team_name_a = os.getenv("TEAM_NAME_A", "A")
     team_name_b = os.getenv("TEAM_NAME_B", "B")
     return {
