@@ -21,96 +21,147 @@ logger = logging.getLogger(__name__)
 
 QUESTIONS_FILE = Path(__file__).resolve().parent.parent / "questions.json"
 HINT_POINT_STEPS = [
-    {"time": 6, "ratio": 0.0, "points": 5},
-    {"time": 12, "ratio": 0.2, "points": 4},
-    {"time": 18, "ratio": 0.4, "points": 3},
-    {"time": 24, "ratio": 0.6, "points": 2},
+    {"time": 2, "ratio": 0.0, "points": 5},
+    {"time": 4, "ratio": 0.2, "points": 4},
+    {"time": 6, "ratio": 0.4, "points": 3},
+    {"time": 8, "ratio": 0.6, "points": 2},
 ]
-FINAL_REVEAL_TIME = 30
+FINAL_REVEAL_TIME = 10
 MIN_POINTS = 1
 
 
-def _cancel_hint_tasks(chat_data: dict) -> None:
+def _cancel_pending_tasks(chat_data: dict) -> None:
+    """Cancel all scheduled hint/reveal tasks, avoiding self-cancellation."""
     tasks: list[asyncio.Task] = chat_data.pop("hint_tasks", [])
+    current_task = asyncio.current_task()
     for task in tasks:
+        if task is current_task:
+            continue  # Don't cancel the task that's calling us
         if not task.done():
             task.cancel()
-    chat_data.pop("hint_state", None)
 
 
-def _schedule_hints(update: Update, answer: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE, chat_data: dict) -> None:
-    """Schedule timed hint reveals while the question is active."""
-    _cancel_hint_tasks(chat_data)
-    qid = chat_data.get("current_qid", 0)
-    indices = [i for i, ch in enumerate(answer) if not ch.isspace()]
-    chat_data["hint_state"] = {
-        "qid": qid,
-        "revealed": set(),
-        "indices": indices,
-        "answer": answer,
-    }
-    chat_data["current_points"] = HINT_POINT_STEPS[0]["points"] if HINT_POINT_STEPS else MIN_POINTS
+def _reset_question_state(chat_data: dict, next_index: int) -> int:
+    """
+    Reset all per-question state atomically and return the new generation ID.
 
-    async def _reveal(delay: int, ratio: float) -> None:
+    This ensures a clean slate before each question:
+    - Cancels pending hint tasks
+    - Increments generation (used to detect stale async operations)
+    - Resets answered flag, points, timestamps, and hint state
+
+    Returns:
+        The new generation ID for this question session.
+    """
+    _cancel_pending_tasks(chat_data)
+
+    # Increment generation - this invalidates any stale async callbacks
+    generation = chat_data.get("generation", 0) + 1
+
+    chat_data.update({
+        "index": next_index,
+        "generation": generation,
+        "answered": False,
+        "question_start_ts": None,
+        "current_points": HINT_POINT_STEPS[0]["points"] if HINT_POINT_STEPS else MIN_POINTS,
+        "hint_tasks": [],
+        "revealed_indices": set(),
+    })
+
+    return generation
+
+
+def _is_stale(chat_data: dict, generation: int) -> bool:
+    """Check if this generation is outdated (question has changed)."""
+    return chat_data.get("generation") != generation or chat_data.get("answered", False)
+
+
+def _schedule_hints(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_data: dict,
+    chat_id: int,
+    answer: str,
+    generation: int,
+) -> None:
+    """
+    Schedule timed hint reveals and auto-reveal for the current question.
+
+    Args:
+        generation: The question generation ID - used to detect if callbacks are stale.
+    """
+    if not answer:
+        return
+
+    # Prepare randomized reveal order for progressive hints
+    revealable_indices = [i for i, ch in enumerate(answer) if not ch.isspace()]
+    reveal_order = revealable_indices.copy()
+    random.shuffle(reveal_order)
+    chat_data["reveal_order"] = reveal_order
+
+    async def _send_hint(delay: int, ratio: float, points: int) -> None:
+        """Send a progressive hint after delay, if question is still active."""
         try:
             await asyncio.sleep(delay)
-            state = chat_data.get("hint_state")
-            if not state or chat_data.get("answered") or state.get("qid") != qid:
+            if _is_stale(chat_data, generation):
                 return
 
-            indices_local: list[int] = state["indices"]
-            revealed: set[int] = state["revealed"]
-            target = math.ceil(len(indices_local) * ratio)
-            if target > len(revealed):
-                remaining = [i for i in indices_local if i not in revealed]
-                add_count = min(len(remaining), target - len(revealed))
-                if add_count > 0:
-                    revealed.update(random.sample(remaining, k=add_count))
+            # Calculate which indices to reveal based on ratio
+            target_count = math.ceil(len(reveal_order) * ratio)
+            revealed = set(reveal_order[:target_count])
+            chat_data["revealed_indices"] = revealed
+            chat_data["current_points"] = points
 
-            hint = _build_progressive_hint(answer, revealed)
-            await context.bot.send_message(chat_id=chat_id, text=f"Hint: {hint}")
-            # Drop points in lockstep with this hint
-            chat_data["current_points"] = next(
-                (step["points"]
-                 for step in HINT_POINT_STEPS if step["time"] == delay),
-                chat_data.get("current_points", MIN_POINTS),
-            )
+            hint_text = _build_progressive_hint(answer, revealed)
+            await context.bot.send_message(chat_id=chat_id, text=f"Hint: {hint_text}")
         except asyncio.CancelledError:
-            return
+            pass  # Task was cancelled, exit gracefully
         except Exception as e:
             logger.warning(f"Failed to send hint: {e}")
 
-    async def _auto_reveal(delay: int) -> None:
+    async def _timeout_reveal(delay: int) -> None:
+        """Reveal answer after timeout and advance to next question."""
         try:
             await asyncio.sleep(delay)
-            state = chat_data.get("hint_state")
-            if not state or chat_data.get("answered") or state.get("qid") != qid:
+            if _is_stale(chat_data, generation):
                 return
+
+            # Mark as answered to prevent race conditions
             chat_data["answered"] = True
+
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"No one guessed! The correct answer is {answer}",
+                text=f"*❌ No one guessed!*\n\nThe correct answer was: *{answer}*",
+                parse_mode="Markdown"
             )
+
+            # Countdown before next question
             wait_seconds = context.bot_data.get("QUIZ_DELAY_SECONDS", 0)
             if wait_seconds > 0:
                 try:
                     msg = await context.bot.send_message(chat_id=chat_id, text="Next question loading...")
-                    await run_countdown(message=msg, seconds=wait_seconds)
+                    await countdown_timer(message=msg, seconds=wait_seconds)
                 except Exception:
-                    pass
-            chat_data["index"] = chat_data.get("index", 0) + 1
-            await _send_question(update, context)
-        except asyncio.CancelledError:
-            return
-        except Exception as e:
-            logger.warning(f"Auto reveal failed: {e}")
+                    logger.warning(
+                        "Countdown after timeout failed; continuing anyway")
 
+            # Advance to next question
+            logger.info("Proceeding to next question after timeout")
+            next_index = chat_data.get("index", 0) + 1
+            await _send_question(update, context, next_index)
+
+        except asyncio.CancelledError:
+            pass  # Task was cancelled, exit gracefully
+        except Exception as e:
+            logger.warning(f"Timeout reveal failed: {e}")
+
+    # Schedule all hint and timeout tasks
     chat_data["hint_tasks"] = [
-        *[
-            asyncio.create_task(_reveal(step["time"], step["ratio"]))
-            for step in HINT_POINT_STEPS
-        ],
-        asyncio.create_task(_auto_reveal(FINAL_REVEAL_TIME)),
+        asyncio.create_task(_send_hint(
+            step["time"], step["ratio"], step["points"]))
+        for step in HINT_POINT_STEPS
+    ] + [
+        asyncio.create_task(_timeout_reveal(FINAL_REVEAL_TIME)),
     ]
 
 
@@ -181,56 +232,111 @@ def _load_questions() -> list[dict]:
         return json.load(fh)
 
 
-async def _send_question(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def _send_question(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    next_index: Optional[int] = None,
+) -> None:
+    """
+    Send the next question to the chat.
+
+    This function handles the complete question lifecycle:
+    1. Resets all per-question state (cancels old tasks, clears flags)
+    2. Sends the question (with optional media)
+    3. Schedules hint reveals and timeout
+
+    Args:
+        next_index: The question index to send. If None, uses current index from chat_data.
+    """
     chat_data = context.chat_data
-    _cancel_hint_tasks(chat_data)
+    chat_id = update.effective_chat.id
     questions: list[dict] = chat_data["questions"]
-    idx = chat_data.get("index", 0) % len(questions)
-    chat_data["index"] = idx
-    chat_data["answered"] = False
-    chat_data["current_qid"] = chat_data.get("current_qid", 0) + 1
+
+    # Determine which question to send
+    if next_index is None:
+        next_index = chat_data.get("index", 0)
+    idx = next_index % len(questions)
+
+    # Reset state atomically - this cancels old tasks and returns new generation
+    generation = _reset_question_state(chat_data, idx)
+
+    logger.info(
+        f"Sending question {idx + 1} (gen={generation}) to chat {chat_id}")
 
     qdata = questions[idx]
-    question = qdata.get("question", "")
+    question_text = qdata.get("question", "")
     q_type = qdata.get("type", "text")
-    logger.info(
-        f"Asking question {idx + 1} to chat {update.effective_chat.id}: {question}")
-    await context.bot.send_message(
-        chat_id=update.effective_chat.id,
-        text=f"📢 *QUESTION {idx + 1}* 📢",
-        parse_mode="Markdown"
-    )
+    answer = qdata.get("answer", "")
 
-    file_path = qdata.get("file")
-    if file_path and q_type in {"image", "audio", "video"}:
-        asset_path = Path(file_path)
-        try:
-            with asset_path.open("rb") as fh:
-                if q_type == "image":
-                    await context.bot.send_photo(chat_id=update.effective_chat.id, photo=fh)
-                elif q_type == "audio":
-                    await context.bot.send_audio(chat_id=update.effective_chat.id, audio=fh)
-                elif q_type == "video":
-                    await context.bot.send_video(chat_id=update.effective_chat.id, video=fh)
-        except Exception as e:
-            logger.warning(f"Failed to send asset {asset_path}: {e}")
+    try:
+        # Send question header
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"📢 *QUESTION {idx + 1}* 📢",
+            parse_mode="Markdown"
+        )
 
-    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"{question}")
+        # Send media if present
+        file_path = qdata.get("file")
+        if file_path and q_type in {"image", "audio", "video"}:
+            await _send_question_media(context, chat_id, Path(file_path), q_type)
 
-    chat_data["question_start_ts"] = monotonic()
-    _schedule_hints(update, qdata.get("answer", ""),
-                    update.effective_chat.id, context, chat_data)
+        # Send question text
+        await context.bot.send_message(chat_id=chat_id, text=question_text)
+
+        # Record start time and schedule hints
+        chat_data["question_start_ts"] = monotonic()
+        _schedule_hints(update, context, chat_data,
+                        chat_id, answer, generation)
+
+        logger.info(f"Question {idx + 1} sent successfully to chat {chat_id}")
+
+    except Exception as e:
+        logger.warning(f"Failed to send question {idx + 1}: {e}")
+        chat_data["answered"] = True  # Prevent answers for unsent question
 
 
-async def run_countdown(
+async def _send_question_media(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    asset_path: Path,
+    media_type: str,
+) -> None:
+    """Send media (image/audio/video) for a question."""
+    try:
+        with asset_path.open("rb") as fh:
+            if media_type == "image":
+                await context.bot.send_photo(chat_id=chat_id, photo=fh)
+            elif media_type == "audio":
+                await context.bot.send_audio(chat_id=chat_id, audio=fh)
+            elif media_type == "video":
+                await context.bot.send_video(chat_id=chat_id, video=fh)
+    except Exception as e:
+        logger.warning(f"Failed to send {media_type} asset {asset_path}: {e}")
+
+
+async def countdown_timer(
     message: Message,
     seconds: int,
     start_text: str = "🚀 Next question in",
     end_text: str = "🎯 GO!",
-    update_interval: int = 1
+    update_interval: int = 1,
+    fancy_animation: bool = False
 ) -> Optional[Message]:
+    """Run a countdown timer with optional animation.
+
+    When fancy_animation=True: Shows animated countdown
+    When fancy_animation=False: Just waits without showing updates
+
+    In both cases, the function blocks until the timer completes.
+    """
     if seconds <= 0:
         return await message.reply_text(f"*{end_text}*", parse_mode="Markdown")
+
+    if not fancy_animation:
+        await asyncio.sleep(seconds)
+        await message.reply_text(f"⏱️ *{end_text}*", parse_mode="Markdown")
+        return None
 
     countdown_msg = None
 
@@ -291,11 +397,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
     await message.reply_text(start_message, parse_mode="Markdown")
     wait_seconds = context.bot_data.get("QUIZ_DELAY_SECONDS", 0)
-    await run_countdown(
+    await countdown_timer(
         message=update.effective_message,
         seconds=wait_seconds,
     )
-    await _send_question(update, context)
+    try:
+        await _send_question(update, context)
+    except Exception as err:
+        logger.warning(f"Failed to send initial question: {err}")
 
 
 async def show_scores(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -396,40 +505,47 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if submitted not in expected_values:
         logger.info(
             f"Incorrect answer by {user_info} in chat {update.effective_chat.id}")
+        return
 
     user = update.effective_user
     user_id = user.id if user else None
     name = user.full_name if user else "Player"
-    _cancel_hint_tasks(chat_data)
+
+    # Mark answered immediately to prevent race conditions
+    chat_data["answered"] = True
+    _cancel_pending_tasks(chat_data)
+
+    # Calculate score
     start_ts = chat_data.get("question_start_ts")
     now_ts = monotonic()
     elapsed = max(0.0, now_ts - start_ts) if start_ts else 0.0
-    points = chat_data.get("current_points")
-
-    if points is None:
-        points = _points_for_elapsed(elapsed)
+    points = chat_data.get("current_points") or _points_for_elapsed(elapsed)
 
     context.bot_data[user_id] = name
     scores = chat_data.setdefault("scores", {})
     scores[user_id] = scores.get(user_id, 0) + points
-    chat_data["answered"] = True
     logger.info(
         f"Correct answer by user {user_id} in chat {update.effective_chat.id}; score now {scores[user_id]}"
     )
 
+    # Announce correct answer and wait before next question
     wait_seconds = context.bot_data.get("QUIZ_DELAY_SECONDS", 0)
     await message.reply_text(
         f"*{answer}* is correct!\n\n{name} *+{points}* (answered in {elapsed:.1f}s)",
         parse_mode="Markdown"
     )
-    await run_countdown(
+    await countdown_timer(
         message=update.effective_message,
         seconds=wait_seconds,
     )
 
+    # Advance to next question (pass next_index explicitly)
     next_idx = idx + 1
-    chat_data["index"] = next_idx
-    await _send_question(update, context)
+    try:
+        await _send_question(update, context, next_idx)
+    except Exception as err:
+        logger.warning(
+            f"Failed to send next question after correct answer: {err}")
 
 
 async def split_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

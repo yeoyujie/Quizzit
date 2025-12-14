@@ -3,7 +3,6 @@ from dotenv import load_dotenv
 
 
 def load_config() -> dict:
-    """Load configuration from environment variables (.env supported)."""
     load_dotenv()
     token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not token:
