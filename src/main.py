@@ -73,12 +73,10 @@ def _reset_question_state(chat_data: dict, next_index: int) -> int:
 
 
 def _is_stale(chat_data: dict, generation: int) -> bool:
-    """Check if this generation is outdated (question has changed)."""
     return chat_data.get("generation") != generation or chat_data.get("answered", False)
 
 
 def _is_accepting_answers(chat_data: dict) -> bool:
-    """Check if answers are currently being accepted."""
     return chat_data.get("accepting_answers", False) and not chat_data.get("answered", False)
 
 
@@ -297,7 +295,7 @@ async def _send_question(
                 parse_mode="Markdown"
             )
 
-        # Record start time, open for answers, and schedule hints
+        # Mark question start time and enable answer acceptance
         chat_data["question_start_ts"] = monotonic()
         chat_data["accepting_answers"] = True
         _schedule_hints(update, context, chat_data,
@@ -307,7 +305,7 @@ async def _send_question(
 
     except Exception as e:
         logger.warning(f"Failed to send question {idx + 1}: {e}")
-        chat_data["answered"] = True  # Prevent answers for unsent question
+        chat_data["answered"] = True
 
 
 async def _send_question_media_with_caption(
@@ -358,11 +356,6 @@ async def countdown_timer(
 
     if not fancy_animation:
         await asyncio.sleep(5)
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"*{end_text}*",
-            parse_mode="Markdown"
-        )
         return
 
     try:
@@ -431,12 +424,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def show_scores(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    message = update.effective_message
+
+    if chat.type not in {"group", "supergroup"}:
+        await message.reply_text("/start can only be used in a group chat.")
+        return
+
+    if not await _require_admin(update, context):
+        return
+
     scores: dict = context.chat_data.get("scores", {})
     if not scores:
         await update.message.reply_text("No scores yet. Answer a question to get on the board.")
         return
 
     teams = context.chat_data.get("teams", {})
+
+    # Map internal team keys to configured display names
+    name_map = {
+        "A": context.bot_data.get("TEAM_NAME_A", "A"),
+        "B": context.bot_data.get("TEAM_NAME_B", "B"),
+    }
 
     def _team_for(user_id: int | None) -> str:
         if not user_id:
@@ -454,7 +463,7 @@ async def show_scores(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     team_lines = ["👥 Team Scores"]
     for label, pts in sorted(team_scores.items(), key=lambda item: item[1], reverse=True):
-        team_lines.append(f"Team {label}: {pts} pts")
+        team_lines.append(f"Team {name_map.get(label, label)}: {pts} pts")
 
     # Individual scores
     medals = {0: "🥇", 1: "🥈", 2: "🥉"}
@@ -465,8 +474,9 @@ async def show_scores(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         user_name = context.bot_data.get(user_id, "Player")
         badge = medals.get(idx, f"#{idx + 1}")
         team_label = _team_for(user_id)
+        display = name_map.get(team_label, team_label)
         entries.append(
-            f"{badge}  {user_name} [Team {team_label}] — {points} pts")
+            f"{badge}  {user_name} [Team {display}] — {points} pts")
 
     board = ["🏆 Leaderboard 🏆", "\n".join(team_lines), "\n".join(entries)]
     await update.message.reply_text("\n\n".join(board))
@@ -574,8 +584,16 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 async def split_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Split known players into two teams and store the assignment."""
+    chat = update.effective_chat
+    message = update.effective_message
+
+    if chat.type not in {"group", "supergroup"}:
+        await message.reply_text("/start can only be used in a group chat.")
+        return
+
     if not await _require_admin(update, context):
         return
+
     # Always reset previous teams and reshuffle
     context.chat_data.pop("teams", None)
     players = context.chat_data.get("players", {})
@@ -583,40 +601,60 @@ async def split_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Need at least 2 known players to form teams. Have everyone send a message first.")
         return
 
-    # TODO: Change teamnames to be configurable
+    # Use configurable team names from bot_data
+    name_a = context.bot_data.get("TEAM_NAME_A", "A")
+    name_b = context.bot_data.get("TEAM_NAME_B", "B")
+
     pairs = list(players.items())
     random.shuffle(pairs)
     mid = len(pairs) // 2
     team_a = pairs[:mid]
     team_b = pairs[mid:]
     context.chat_data["teams"] = {"A": team_a, "B": team_b}
-
-    def _fmt(team_label: str, members: list[tuple[int, str]]) -> str:
-        lines = [f"Team {team_label} ({len(members)}):"]
+    def _fmt(team_key: str, display_name: str, members: list[tuple[int, str]]) -> str:
+        lines = [f"Team {display_name} ({len(members)}):"]
         for _, name in members:
             lines.append(f"• {name}")
         return "\n".join(lines)
 
-    board = ["Teams reshuffled!", _fmt("A", team_a), _fmt("B", team_b)]
+    board = [
+        "Teams reshuffled!",
+        _fmt("A", name_a, team_a),
+        _fmt("B", name_b, team_b),
+    ]
     await update.message.reply_text("\n\n".join(board))
 
 
 async def show_teams(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
+    message = update.effective_message
+
+    if chat.type not in {"group", "supergroup"}:
+        await message.reply_text("/start can only be used in a group chat.")
+        return
+
     if not await _require_admin(update, context):
         return
+
     teams = context.chat_data.get("teams")
     if not teams:
         await update.message.reply_text("No teams yet. Use /group to split the current players.")
         return
 
-    def _fmt(team_label: str, members: list[tuple[int, str]]) -> str:
-        lines = [f"Team {team_label} ({len(members)}):"]
+    name_a = context.bot_data.get("TEAM_NAME_A", "A")
+    name_b = context.bot_data.get("TEAM_NAME_B", "B")
+
+    def _fmt(team_key: str, display_name: str, members: list[tuple[int, str]]) -> str:
+        lines = [f"Team {display_name} ({len(members)}):"]
         for _, name in members:
             lines.append(f"• {name}")
         return "\n".join(lines)
 
-    board = ["Current teams:", _fmt("A", teams.get(
-        "A", [])), _fmt("B", teams.get("B", []))]
+    board = [
+        "Current teams:",
+        _fmt("A", name_a, teams.get("A", [])),
+        _fmt("B", name_b, teams.get("B", [])),
+    ]
     await update.message.reply_text("\n\n".join(board))
 
 
@@ -625,6 +663,8 @@ def main() -> None:
     app = Application.builder().token(cfg["TELEGRAM_BOT_TOKEN"]).build()
     app.bot_data["QUIZ_DELAY_SECONDS"] = cfg.get("QUIZ_DELAY_SECONDS", 0)
     app.bot_data["ADMIN_USER_ID"] = cfg.get("ADMIN_USER_ID")
+    app.bot_data["TEAM_NAME_A"] = cfg.get("TEAM_NAME_A", "A")
+    app.bot_data["TEAM_NAME_B"] = cfg.get("TEAM_NAME_B", "B")
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("scores", show_scores))
