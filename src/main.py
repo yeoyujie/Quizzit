@@ -5,6 +5,7 @@ import math
 import random
 from pathlib import Path
 from time import monotonic
+from html import escape
 
 from config import load_config
 from typing import Optional
@@ -139,8 +140,7 @@ def _schedule_hints(
             wait_seconds = context.bot_data.get("QUIZ_DELAY_SECONDS", 0)
             if wait_seconds > 0:
                 try:
-                    msg = await context.bot.send_message(chat_id=chat_id, text="Next question loading...")
-                    await countdown_timer(message=msg, seconds=wait_seconds)
+                    await countdown_timer(context=context, chat_id=chat_id, seconds=wait_seconds)
                 except Exception:
                     logger.warning(
                         "Countdown after timeout failed; continuing anyway")
@@ -263,26 +263,28 @@ async def _send_question(
     logger.info(
         f"Sending question {idx + 1} (gen={generation}) to chat {chat_id}")
 
-    qdata = questions[idx]
-    question_text = qdata.get("question", "")
-    q_type = qdata.get("type", "text")
-    answer = qdata.get("answer", "")
+    question_data = questions[idx]
+    question_text = question_data.get("question", "")
+    question_type = question_data.get("type", "text")
+    answer = question_data.get("answer", "")
+    file_path = question_data.get("file")
 
     try:
-        # Send question header
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"📢 *QUESTION {idx + 1}* 📢",
-            parse_mode="Markdown"
-        )
+        logger.info(f"Question {idx + 1} content: {question_text}")
+        full_message = f"*QUESTION {idx + 1}*\n\n{question_text}"
 
-        # Send media if present
-        file_path = qdata.get("file")
-        if file_path and q_type in {"image", "audio", "video"}:
-            await _send_question_media(context, chat_id, Path(file_path), q_type)
-
-        # Send question text
-        await context.bot.send_message(chat_id=chat_id, text=question_text)
+        # Send media with caption
+        if file_path and question_type in {"image", "audio", "video"}:
+            await _send_question_media_with_caption(
+                context, chat_id, Path(file_path), question_type, full_message
+            )
+        else:
+            # Just plain text question
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=full_message,
+                parse_mode="Markdown"
+            )
 
         # Record start time and schedule hints
         chat_data["question_start_ts"] = monotonic()
@@ -296,79 +298,87 @@ async def _send_question(
         chat_data["answered"] = True  # Prevent answers for unsent question
 
 
-async def _send_question_media(
+async def _send_question_media_with_caption(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
     asset_path: Path,
     media_type: str,
+    caption: str
 ) -> None:
-    """Send media (image/audio/video) for a question."""
     try:
         with asset_path.open("rb") as fh:
             if media_type == "image":
-                await context.bot.send_photo(chat_id=chat_id, photo=fh)
+                await context.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=fh,
+                    caption=caption,
+                    parse_mode="Markdown"
+                )
             elif media_type == "audio":
-                await context.bot.send_audio(chat_id=chat_id, audio=fh)
+                await context.bot.send_audio(
+                    chat_id=chat_id,
+                    audio=fh,
+                    caption=caption,
+                    parse_mode="Markdown"
+                )
             elif media_type == "video":
-                await context.bot.send_video(chat_id=chat_id, video=fh)
+                await context.bot.send_video(
+                    chat_id=chat_id,
+                    video=fh,
+                    caption=caption,
+                    parse_mode="Markdown"
+                )
     except Exception as e:
         logger.warning(f"Failed to send {media_type} asset {asset_path}: {e}")
 
 
 async def countdown_timer(
-    message: Message,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
     seconds: int,
     start_text: str = "🚀 Next question in",
     end_text: str = "🎯 GO!",
     update_interval: int = 1,
     fancy_animation: bool = False
-) -> Optional[Message]:
-    """Run a countdown timer with optional animation.
-
-    When fancy_animation=True: Shows animated countdown
-    When fancy_animation=False: Just waits without showing updates
-
-    In both cases, the function blocks until the timer completes.
-    """
+) -> None:
     if seconds <= 0:
-        return await message.reply_text(f"*{end_text}*", parse_mode="Markdown")
+        seconds = 0
 
     if not fancy_animation:
-        await asyncio.sleep(seconds)
-        await message.reply_text(f"⏱️ *{end_text}*", parse_mode="Markdown")
-        return None
-
-    countdown_msg = None
+        await asyncio.sleep(5)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"*{end_text}*",
+            parse_mode="Markdown"
+        )
+        return
 
     try:
-        countdown_msg = await message.reply_text(f"{start_text} {seconds}...")
+        countdown_msg = await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"{start_text} {seconds}..."
+        )
 
         for remaining in range(seconds - 1, 0, -1):
             await asyncio.sleep(update_interval)
-
-            try:
-                await countdown_msg.edit_text(f"{start_text} {remaining}...")
-            except BadRequest:
-                return None
-            except Exception as e:
-                logger.warning(f"Failed to edit message: {e}")
-                continue
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=countdown_msg.message_id,
+                text=f"{start_text} {remaining}..."
+            )
 
         await asyncio.sleep(update_interval)
-        await countdown_msg.edit_text(f"*{end_text}*", parse_mode="Markdown")
-
-        return countdown_msg
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=countdown_msg.message_id,
+            text=f"*{end_text}*",
+            parse_mode="Markdown"
+        )
 
     except asyncio.CancelledError:
-        if countdown_msg:
-            try:
-                await countdown_msg.delete()
-            except Exception:
-                pass
         raise
     except Exception as e:
         logger.error(f"Countdown failed: {e}")
-        return None
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -398,7 +408,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await message.reply_text(start_message, parse_mode="Markdown")
     wait_seconds = context.bot_data.get("QUIZ_DELAY_SECONDS", 0)
     await countdown_timer(
-        message=update.effective_message,
+        context=context,
+        chat_id=update.effective_chat.id,
         seconds=wait_seconds,
     )
     try:
@@ -531,11 +542,12 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # Announce correct answer and wait before next question
     wait_seconds = context.bot_data.get("QUIZ_DELAY_SECONDS", 0)
     await message.reply_text(
-        f"*{answer}* is correct!\n\n{name} *+{points}* (answered in {elapsed:.1f}s)",
+        f"*{answer}* is correct!\n\n{name} *+{points}*\n_answered in {elapsed:.1f}s_",
         parse_mode="Markdown"
     )
     await countdown_timer(
-        message=update.effective_message,
+        context=context,
+        chat_id=update.effective_chat.id,
         seconds=wait_seconds,
     )
 
