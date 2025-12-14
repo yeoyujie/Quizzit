@@ -5,12 +5,10 @@ import math
 import random
 from pathlib import Path
 from time import monotonic
-from html import escape
 
 from config import load_config
 from typing import Optional
-from telegram.error import BadRequest
-from telegram import Update, Message, ReactionTypeEmoji
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 
@@ -21,14 +19,15 @@ logging.getLogger("telegram").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 QUESTIONS_FILE = Path(__file__).resolve().parent.parent / "questions.json"
+
+INITIAL_POINTS = 5
 HINT_POINT_STEPS = [
-    {"time": 2, "ratio": 0.0, "points": 5},
-    {"time": 4, "ratio": 0.2, "points": 4},
-    {"time": 6, "ratio": 0.4, "points": 3},
-    {"time": 8, "ratio": 0.6, "points": 2},
+    {"time": 8, "ratio": 0.0, "points": 4},
+    {"time": 14, "ratio": 0.2, "points": 3},
+    {"time": 20, "ratio": 0.4, "points": 2},
+    {"time": 25, "ratio": 0.6, "points": 1},
 ]
-FINAL_REVEAL_TIME = 10
-MIN_POINTS = 1
+FINAL_REVEAL_TIME = 30
 
 
 def _cancel_pending_tasks(chat_data: dict) -> None:
@@ -56,15 +55,16 @@ def _reset_question_state(chat_data: dict, next_index: int) -> int:
     """
     _cancel_pending_tasks(chat_data)
 
-    # Increment generation - this invalidates any stale async callbacks
+    # Increment generation - used to invalidate any stale async callbacks
     generation = chat_data.get("generation", 0) + 1
 
     chat_data.update({
         "index": next_index,
         "generation": generation,
         "answered": False,
+        "accepting_answers": False,  # Only True after question is sent
         "question_start_ts": None,
-        "current_points": HINT_POINT_STEPS[0]["points"] if HINT_POINT_STEPS else MIN_POINTS,
+        "current_points": INITIAL_POINTS,
         "hint_tasks": [],
         "revealed_indices": set(),
     })
@@ -75,6 +75,11 @@ def _reset_question_state(chat_data: dict, next_index: int) -> int:
 def _is_stale(chat_data: dict, generation: int) -> bool:
     """Check if this generation is outdated (question has changed)."""
     return chat_data.get("generation") != generation or chat_data.get("answered", False)
+
+
+def _is_accepting_answers(chat_data: dict) -> bool:
+    """Check if answers are currently being accepted."""
+    return chat_data.get("accepting_answers", False) and not chat_data.get("answered", False)
 
 
 def _schedule_hints(
@@ -172,10 +177,16 @@ def _normalize(text: str) -> str:
 
 def _points_for_elapsed(seconds: float) -> int:
     """Return points based on elapsed time thresholds."""
+
+    if not HINT_POINT_STEPS or seconds < HINT_POINT_STEPS[0]["time"]:
+        return INITIAL_POINTS
+
+    points = HINT_POINT_STEPS[-1]["points"]
     for step in HINT_POINT_STEPS:
-        if seconds <= step["time"]:
-            return step["points"]
-    return MIN_POINTS
+        if seconds < step["time"]:
+            break
+        points = step["points"]
+    return points
 
 
 def _build_progressive_hint(answer: str, revealed: set[int]) -> str:
@@ -286,8 +297,9 @@ async def _send_question(
                 parse_mode="Markdown"
             )
 
-        # Record start time and schedule hints
+        # Record start time, open for answers, and schedule hints
         chat_data["question_start_ts"] = monotonic()
+        chat_data["accepting_answers"] = True
         _schedule_hints(update, context, chat_data,
                         chat_id, answer, generation)
 
@@ -494,9 +506,9 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     idx = chat_data.get("index", 0) % len(questions)
-    if chat_data.get("answered"):
+    if not _is_accepting_answers(chat_data):
         logger.info(
-            f"Ignoring answer. Question already answered in chat {update.effective_chat.id}"
+            f"Ignoring answer. Not accepting answers in chat {update.effective_chat.id}"
         )
         return
 
