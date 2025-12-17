@@ -15,6 +15,7 @@ from src.commands import (
     enabledouble,
     disabledouble,
     showtags,
+    join,
     mute,
     givemute,
     removemute
@@ -50,6 +51,7 @@ def main() -> None:
     app.add_handler(CommandHandler("hint", hint))
     app.add_handler(CommandHandler("group", split_groups))
     app.add_handler(CommandHandler("team", show_teams))
+    app.add_handler(CommandHandler("join", join))
     app.add_handler(CommandHandler("givedouble", enabledouble))
     app.add_handler(CommandHandler("removedouble", disabledouble))
     app.add_handler(CommandHandler("showtags", showtags))

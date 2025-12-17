@@ -90,6 +90,72 @@ async def show_teams(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 @require_group
+async def join(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Allow a user to join/switch to team A or B before the game starts. One use per user."""
+    message = update.message
+    if not message or not message.text or not message.from_user:
+        return
+
+    parts = message.text.strip().split()
+    if len(parts) < 2:
+        await message.reply_text("Usage: /join <team>  e.g. /join a")
+        return
+
+    token = parts[1].strip()
+
+    quiz = context.chat_data.setdefault("quiz", {})
+    teams = quiz.get("teams")
+    if not teams:
+        await message.reply_text("No teams yet. Use /group to create teams first.")
+        return
+
+    # Disallow switching after the quiz has been started (questions present)
+    if quiz.get("questions"):
+        await message.reply_text("Team switching is only allowed before the game starts.")
+        return
+
+    user = update.effective_user
+    user_id = user.id
+    name = user.full_name
+
+    # Track one-time usage
+    used = quiz.setdefault("join_used", set())
+    if user_id in used:
+        await message.reply_text("You have already used /join once and cannot switch teams again.")
+        return
+
+    token_norm = token.lower()
+    label = None
+    if token_norm in ("a", "b"):
+        label = token_norm.upper()
+    else:
+        name_a = context.bot_data.get("TEAM_NAME_A", "A").lower()
+        name_b = context.bot_data.get("TEAM_NAME_B", "B").lower()
+        if token_norm == name_a:
+            label = "A"
+        elif token_norm == name_b:
+            label = "B"
+
+    if not label:
+        await message.reply_text(f"Unknown team: {token}")
+        return
+
+    # Remove user from any team they are currently in
+    for lab in ("A", "B"):
+        members = teams.get(lab, [])
+        teams[lab] = [m for m in members if m[0] != user_id]
+
+    # Add to target team if not already present
+    teams.setdefault(label, [])
+    teams[label].append((user_id, name))
+
+    used.add(user_id)
+    display_name = context.bot_data.get(f"TEAM_NAME_{label}", label)
+    await message.reply_text(f"You have joined {display_name}. (You cannot use /join again.)")
+    logger.info(f"User {user_id} joined team {label} via /join")
+
+
+@require_group
 async def add_points(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await require_admin(update, context):
         return
