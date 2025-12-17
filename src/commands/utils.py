@@ -55,6 +55,20 @@ def record_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     players[user.id] = user.full_name or "Player"
 
 
+async def seen_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Async wrapper to record any seen user message in group chats.
+
+    Register this as a catch-all MessageHandler for group chats so the
+    bot builds a `chat_data['players']` mapping even when no quiz is
+    running.
+    """
+    try:
+        record_user(update, context)
+        logger.debug(f"Recorded seen user for chat {update.effective_chat.id if update.effective_chat else 'unknown'}")
+    except Exception:
+        logger.exception("Failed to record seen user")
+
+
 async def countdown_timer(
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,

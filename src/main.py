@@ -12,8 +12,8 @@ from src.commands import (
     split_groups,
     show_teams,
 )
+from src.commands.utils import seen_message
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s"
@@ -48,6 +48,15 @@ def main() -> None:
         MessageHandler(
             filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
             handle_answer
+        )
+    )
+
+    # Then register a catch-all group message handler to record seen users
+    # (exclude commands so it doesn't run for /start, /group, etc.)
+    app.add_handler(
+        MessageHandler(
+            filters.ChatType.GROUPS & ~filters.COMMAND,
+            seen_message
         )
     )
 

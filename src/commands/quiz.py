@@ -24,12 +24,12 @@ QUESTIONS_FILE = Path(__file__).resolve(
 ).parent.parent.parent / "questions.json"
 INITIAL_POINTS = 5
 HINT_POINT_STEPS = [
-    {"time": 8, "ratio": 0.0, "points": 4},
+    {"time": 7, "ratio": 0.0, "points": 4},
     {"time": 14, "ratio": 0.2, "points": 3},
-    {"time": 20, "ratio": 0.4, "points": 2},
-    {"time": 25, "ratio": 0.6, "points": 1},
+    {"time": 21, "ratio": 0.4, "points": 2},
+    {"time": 28, "ratio": 0.6, "points": 1},
 ]
-FINAL_REVEAL_TIME = 30
+FINAL_REVEAL_TIME = 35
 
 
 def _load_questions() -> list[dict]:
@@ -120,13 +120,13 @@ async def _send_hint_dm(
     question: dict,
     context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Send a hint via DM to the user."""
-    answer = question.get("answer", "")
-    if not answer:
-        return
-    first_char = answer[0]
-    length = len(answer)
-    text = f"Hint for Question {idx + 1}: starts with '{first_char}' and has {length} characters."
+    hints = question.get("hints") or []
+    if hints:
+        hint_text = random.choice(hints)
+    else:
+        hint_text = f"There are no hints available for this question.\n\n" \
+
+    text = f"Hint for Question {idx + 1}: {hint_text}"
     await context.bot.send_message(chat_id=user_id, text=text)
 
 
@@ -299,13 +299,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     questions = _load_questions()
     logger.info(f"Loaded {len(questions)} questions from {QUESTIONS_FILE}")
 
+    # Preserve any pre-existing teams (e.g. created via /group before /start)
+    existing_quiz = context.chat_data.get("quiz", {}) or {}
+    preserved_teams = existing_quiz.get("teams")
+
     # Store all quiz state under a single `quiz` namespace
-    context.chat_data["quiz"] = {
+    new_quiz = {
         "questions": questions,
         "index": 0,
         "scores": {},
         "answered": False,
     }
+    if preserved_teams is not None:
+        new_quiz["teams"] = preserved_teams
+
+    context.chat_data["quiz"] = new_quiz
 
     start_message = (
         "🎊 *QUIZ TIME!* 🎊\n\n"
@@ -340,12 +348,58 @@ async def hint(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     idx = quiz.get("index", 0) % len(questions)
+    current_question = questions[idx]
+    question_hints = current_question.get("hints") or []
+    if not question_hints:
+        try:
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=f"No hint available for Question {idx + 1}."
+            )
+        except Exception:
+            logger.info(
+                f"Could not DM {user.full_name} about missing hint.")
+        return
+
+    # Track per-chat per-user hint usage. Structure:
+    # context.chat_data['hint_usage'] = { user_id: {'count': int, 'questions': set(int)} }
+    usage = context.chat_data.setdefault("hint_usage", {})
+    entry = usage.setdefault(user.id, {"count": 0, "questions": set()})
+
+    MAX_HINTS = 3
+
+    if entry["count"] >= MAX_HINTS:
+        try:
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=f"No more hints available. You've used all {MAX_HINTS} hints."
+            )
+        except Exception:
+            logger.info(
+                f"Could not DM {user.full_name} about hint limit.")
+        return
+
+    if idx in entry["questions"]:
+        try:
+            await context.bot.send_message(
+                chat_id=user.id,
+                text=f"You've already received a hint for Question {idx + 1}."
+            )
+        except Exception:
+            logger.info(
+                f"Could not DM {user.full_name} about hint limit.")
+        return
+
     try:
         await _send_hint_dm(user.id, idx, questions[idx], context)
     except Exception:
         await update.message.reply_text(
             f"Could not DM {user.full_name}. Please make sure you've started a chat with me."
         )
+        return
+
+    entry["count"] += 1
+    entry["questions"].add(idx)
 
 
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -360,7 +414,6 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not questions:
         logger.info(
             f"Received answer but no quiz state for chat {update.effective_chat.id}")
-        await message.reply_text("Quiz not started here. Send /start to begin.")
         return
 
     idx = quiz.get("index", 0) % len(questions)

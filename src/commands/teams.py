@@ -1,10 +1,12 @@
 import random
+import logging
 
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from src.commands.utils import require_group, require_admin
 
+logger = logging.getLogger(__name__)
 
 def _format_team(display_name: str, members: list[tuple[int, str]]) -> str:
     lines = [f"Team {display_name} ({len(members)}):"]
@@ -22,6 +24,7 @@ async def split_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     quiz = context.chat_data.setdefault("quiz", {})
     quiz.pop("teams", None)
     players = context.chat_data.get("players", {})
+    logger.info(f"Known players: {players}")
 
     if len(players) < 2:
         await update.message.reply_text(
