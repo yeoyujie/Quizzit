@@ -137,3 +137,169 @@ async def add_points(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await message.reply_text(
         f"{display_name} {sign}{points} pts added to team {label} (team total: {team_scores[label]} pts)."
     )
+
+
+@require_group
+async def givemute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin(update, context):
+        return
+
+    message = update.message
+    if not message or not message.text:
+        return
+
+    parts = message.text.strip().split()
+    if len(parts) < 2:
+        await message.reply_text("Usage: /givemute <team>  e.g. /givemute a")
+        return
+
+    token = parts[1].strip()
+
+    quiz = context.chat_data.setdefault("quiz", {})
+    teams = quiz.get("teams")
+    if not teams:
+        await message.reply_text("No teams yet. Use /group to split the current players.")
+        return
+
+    label = None
+    token_up = token.upper()
+    if token_up in teams:
+        label = token_up
+    else:
+        name_a = context.bot_data.get("TEAM_NAME_A", "A").lower()
+        name_b = context.bot_data.get("TEAM_NAME_B", "B").lower()
+        if token.lower() == name_a:
+            label = "A"
+        elif token.lower() == name_b:
+            label = "B"
+
+    if not label:
+        await message.reply_text(f"Unknown team: {token}")
+        return
+
+    # Enable mute for this team and reset their remaining uses to 3
+    mute_enabled = quiz.setdefault("mute_enabled", {})
+    mute_uses = quiz.setdefault("mute_uses", {})
+    mute_enabled[label] = True
+    mute_uses[label] = 3
+
+    display_name = context.bot_data.get(f"TEAM_NAME_{label}", label)
+    await message.reply_text(f"{display_name} can now use /mute (3 uses for the team this game).")
+
+
+@require_group
+async def removemute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin(update, context):
+        return
+
+    message = update.message
+    if not message or not message.text:
+        return
+
+    parts = message.text.strip().split()
+    if len(parts) < 2:
+        await message.reply_text("Usage: /removemute <team>  e.g. /removemute a")
+        return
+
+    token = parts[1].strip()
+
+    quiz = context.chat_data.get("quiz", {})
+    teams = quiz.get("teams") if quiz else None
+    if not teams:
+        await message.reply_text("No teams yet. Use /group to split the current players.")
+        return
+
+    label = None
+    token_up = token.upper()
+    if token_up in teams:
+        label = token_up
+    else:
+        name_a = context.bot_data.get("TEAM_NAME_A", "A").lower()
+        name_b = context.bot_data.get("TEAM_NAME_B", "B").lower()
+        if token.lower() == name_a:
+            label = "A"
+        elif token.lower() == name_b:
+            label = "B"
+
+    if not label:
+        await message.reply_text(f"Unknown team: {token}")
+        return
+
+    mute_enabled = quiz.setdefault("mute_enabled", {})
+    mute_uses = quiz.setdefault("mute_uses", {})
+    mute_enabled[label] = False
+    mute_uses.pop(label, None)
+
+    display_name = context.bot_data.get(f"TEAM_NAME_{label}", label)
+    await message.reply_text(f"{display_name} can no longer use /mute.")
+
+
+@require_group
+async def mute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Team members can call /mute while their team has been granted mute ability.
+
+    This command is limited to 3 uses per team per game. It does not perform an actual
+    Telegram mute here; it implements the permission and counting logic and returns
+    a confirmation. Integrate actual mute behavior separately if desired.
+    """
+    message = update.message
+    if not message or not message.from_user:
+        return
+
+    user = update.effective_user
+    user_id = user.id
+
+    quiz = context.chat_data.get("quiz", {})
+    teams = quiz.get("teams") if quiz else None
+    if not teams:
+        logging.info("No teams found for /mute command.")
+        return
+
+    user_label = None
+    for lab, members in teams.items():
+        if any(uid == user_id for uid, _ in members):
+            user_label = lab
+            break
+
+    if not user_label:
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"You are not assigned to any team, so you cannot use /mute.",
+            )
+        except Exception:
+            logger.info(
+                f"Could not DM {user} about missing hint.")
+        return
+
+    mute_enabled = quiz.setdefault("mute_enabled", {})
+    mute_uses = quiz.setdefault("mute_uses", {})
+    if not mute_enabled.get(user_label, False):
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"Your team is not allowed to use /mute.",
+            )
+        except Exception:
+            logger.info(
+                f"Could not DM {user}.")
+        return
+
+    remaining = mute_uses.get(user_label, 0)
+    if remaining <= 0:
+        try:
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"Your team has no remaining /mute uses.",
+            )
+        except Exception:
+            logger.info(
+                f"Could not DM {user}.")
+        return
+
+    mute_uses[user_label] = remaining - 1
+
+    display_name = context.bot_data.get(f"{user_label}", user_label)
+    await message.reply_text(
+        f"{display_name} used /mute. Remaining team mutes: {mute_uses[user_label]}"
+    )
