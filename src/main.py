@@ -12,6 +12,9 @@ from src.commands import (
     split_groups,
     show_teams,
     add_points,
+    mute,
+    givemute,
+    removemute
 )
 from src.commands.utils import seen_message
 
@@ -44,6 +47,9 @@ def main() -> None:
     app.add_handler(CommandHandler("hint", hint))
     app.add_handler(CommandHandler("group", split_groups))
     app.add_handler(CommandHandler("team", show_teams))
+    app.add_handler(CommandHandler("mute", mute))
+    app.add_handler(CommandHandler("givemute", givemute))
+    app.add_handler(CommandHandler("removemute", removemute))
 
     # Register message handler for answers
     app.add_handler(

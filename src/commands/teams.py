@@ -1,5 +1,7 @@
 import random
 import logging
+import asyncio
+from time import monotonic
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -42,6 +44,11 @@ async def split_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     team_a = pairs[:mid]
     team_b = pairs[mid:]
     quiz["teams"] = {"A": team_a, "B": team_b}
+
+    quiz.setdefault("mute_enabled", {"A": False, "B": False})
+    quiz.setdefault("mute_uses", {})
+    quiz.pop("muted_team", None)
+    quiz.pop("muted_until", None)
 
     board = [
         "Teams reshuffled!",
@@ -160,31 +167,38 @@ async def givemute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not teams:
         await message.reply_text("No teams yet. Use /group to split the current players.")
         return
-
+    # Resolve token to internal label 'A' or 'B'
+    token_norm = token.strip().lower()
     label = None
-    token_up = token.upper()
-    if token_up in teams:
-        label = token_up
+    if token_norm in ("a", "b"):
+        label = token_norm.upper()
     else:
         name_a = context.bot_data.get("TEAM_NAME_A", "A").lower()
         name_b = context.bot_data.get("TEAM_NAME_B", "B").lower()
-        if token.lower() == name_a:
+        if token_norm == name_a:
             label = "A"
-        elif token.lower() == name_b:
+        elif token_norm == name_b:
             label = "B"
 
     if not label:
         await message.reply_text(f"Unknown team: {token}")
         return
 
-    # Enable mute for this team and reset their remaining uses to 3
+    # Ensure label is normalized and store state under 'A' or 'B'
+    label = label.upper()
     mute_enabled = quiz.setdefault("mute_enabled", {})
     mute_uses = quiz.setdefault("mute_uses", {})
     mute_enabled[label] = True
     mute_uses[label] = 3
 
     display_name = context.bot_data.get(f"TEAM_NAME_{label}", label)
+    logger.info(
+        f"/givemute: enabled mute for label={label} (display={display_name})")
     await message.reply_text(f"{display_name} can now use /mute (3 uses for the team this game).")
+    # Ensure other team has explicit default keys too
+    other = "A" if label == "B" else "B"
+    mute_enabled.setdefault(other, False)
+    mute_uses.setdefault(other, 0)
 
 
 @require_group
@@ -208,29 +222,46 @@ async def removemute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if not teams:
         await message.reply_text("No teams yet. Use /group to split the current players.")
         return
-
+    token_norm = token.strip().lower()
     label = None
-    token_up = token.upper()
-    if token_up in teams:
-        label = token_up
+    if token_norm in ("a", "b"):
+        label = token_norm.upper()
     else:
         name_a = context.bot_data.get("TEAM_NAME_A", "A").lower()
         name_b = context.bot_data.get("TEAM_NAME_B", "B").lower()
-        if token.lower() == name_a:
+        if token_norm == name_a:
             label = "A"
-        elif token.lower() == name_b:
+        elif token_norm == name_b:
             label = "B"
 
     if not label:
         await message.reply_text(f"Unknown team: {token}")
         return
 
+    label = label.upper()
     mute_enabled = quiz.setdefault("mute_enabled", {})
     mute_uses = quiz.setdefault("mute_uses", {})
     mute_enabled[label] = False
     mute_uses.pop(label, None)
 
+    # Cancel any active mute tasks for this quiz and clear muted state if matching
+    mute_tasks = quiz.setdefault("mute_tasks", [])
+    # Clear muted team if it matches the label being removed
+    if quiz.get("muted_team") == label:
+        quiz.pop("muted_team", None)
+        quiz.pop("muted_until", None)
+
+        for t in list(mute_tasks):
+            try:
+                if not t.done():
+                    t.cancel()
+            except Exception:
+                pass
+        quiz["mute_tasks"] = []
+
     display_name = context.bot_data.get(f"TEAM_NAME_{label}", label)
+    logger.info(
+        f"/removemute: disabled mute for label={label} (display={display_name})")
     await message.reply_text(f"{display_name} can no longer use /mute.")
 
 
@@ -274,11 +305,12 @@ async def mute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     mute_enabled = quiz.setdefault("mute_enabled", {})
     mute_uses = quiz.setdefault("mute_uses", {})
+    user_label = str(user_label).upper()
     if not mute_enabled.get(user_label, False):
         try:
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"Your team is not allowed to use /mute.",
+                text=(f"Your team is not allowed to use /mute."),
             )
         except Exception:
             logger.info(
@@ -298,8 +330,50 @@ async def mute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     mute_uses[user_label] = remaining - 1
-
     display_name = context.bot_data.get(f"{user_label}", user_label)
     await message.reply_text(
         f"{display_name} used /mute. Remaining team mutes: {mute_uses[user_label]}"
     )
+
+    other_label = "A" if user_label == "B" else "B"
+    quiz["muted_team"] = other_label
+    quiz["muted_until"] = monotonic() + 20
+
+    logger.info(
+        f"Team {other_label} muted for 20 seconds by team {user_label}.")
+
+    chat = update.effective_chat
+    display_other = context.bot_data.get(
+        f"TEAM_NAME_{other_label}", other_label)
+    await context.bot.send_message(
+        chat_id=chat.id,
+        text=f"{display_other} are muted for 20 seconds. Their answers will be ignored."
+    )
+
+    async def _clear_mute_after(delay: int, chat_id: int, muted_label: str) -> None:
+        try:
+            await asyncio.sleep(delay)
+            # Only clear if still muted and the mute has expired
+            if quiz.get("muted_team") == muted_label and monotonic() >= quiz.get("muted_until", 0):
+                quiz.pop("muted_team", None)
+                quiz.pop("muted_until", None)
+                display = context.bot_data.get(
+                    f"TEAM_NAME_{muted_label}", muted_label)
+                logger.info(
+                    f"Clearing mute for team {muted_label} after {delay} seconds.")
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"{display} are no longer muted. You may answer now."
+                )
+                logger.info(
+                    f"Cleared mute for team {muted_label} after {delay} seconds.")
+        except asyncio.CancelledError:
+            logger.info(
+                f"Mute clear task for team {muted_label} was cancelled.")
+            pass
+        except Exception as e:
+            logger.warning(f"Failed clearing mute: {e}")
+
+    mute_tasks = quiz.setdefault("mute_tasks", [])
+    mute_tasks.append(asyncio.create_task(
+        _clear_mute_after(20, chat.id, other_label)))

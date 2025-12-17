@@ -302,6 +302,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Preserve any pre-existing teams (e.g. created via /group before /start)
     existing_quiz = context.chat_data.get("quiz", {}) or {}
     preserved_teams = existing_quiz.get("teams")
+    preserved_mute_enabled = existing_quiz.get("mute_enabled")
+    preserved_mute_uses = existing_quiz.get("mute_uses")
+    preserved_muted_team = existing_quiz.get("muted_team")
+    preserved_muted_until = existing_quiz.get("muted_until")
 
     # Store all quiz state under a single `quiz` namespace
     new_quiz = {
@@ -314,6 +318,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     }
     if preserved_teams is not None:
         new_quiz["teams"] = preserved_teams
+    if preserved_mute_enabled is not None:
+        new_quiz["mute_enabled"] = preserved_mute_enabled
+    if preserved_mute_uses is not None:
+        new_quiz["mute_uses"] = preserved_mute_uses
+    if preserved_muted_team is not None:
+        new_quiz["muted_team"] = preserved_muted_team
+    if preserved_muted_until is not None:
+        new_quiz["muted_until"] = preserved_muted_until
 
     context.chat_data["quiz"] = new_quiz
 
@@ -424,6 +436,40 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"Ignoring answer. Not accepting answers in chat {update.effective_chat.id}")
         return
 
+    # Ignore answers from members of that team if the team is muted
+    user = update.effective_user
+    user_id = user.id if user else None
+    teams = quiz.get("teams", {})
+    if teams and user_id is not None:
+        user_label = None
+        for lab, members in teams.items():
+            if any(uid == user_id for uid, _ in members):
+                user_label = lab
+                break
+
+        muted_label = quiz.get("muted_team")
+        muted_until = quiz.get("muted_until", 0)
+        if user_label and muted_label and user_label == muted_label:
+            from time import monotonic as _mon
+            if _mon() < muted_until:
+                logger.info(
+                    f"Ignoring answer from muted team {user_label} (user {user_id})")
+                return
+            else:
+                quiz.pop("muted_team", None)
+                quiz.pop("muted_until", None)
+                try:
+                    chat_id = update.effective_chat.id
+                    display = context.bot_data.get(
+                        f"TEAM_NAME_{muted_label}", muted_label)
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"{display} are no longer muted. You may answer now."
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to announce unmute in handle_answer: {e}")
+
     current = questions[idx]
     answer = current.get("answer", "")
     submitted = _normalize(message.text)
@@ -488,7 +534,7 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"*{answer}* is correct!\n\n"
         f"{name} *+{points}*\n"
         f"_answered in {elapsed:.1f}s_\n\n"
-        f"{display_name} streak🔥: {quiz.get('winning_streak', 0)}",
+        f"{display_name} streak {quiz.get('winning_streak', 0)}🔥",
         parse_mode="Markdown"
     )
 

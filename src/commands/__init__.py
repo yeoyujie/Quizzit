@@ -2,7 +2,7 @@
 
 from src.commands.quiz import start, hint, handle_answer
 from src.commands.scores import show_scores
-from src.commands.teams import split_groups, show_teams, add_points
+from src.commands.teams import split_groups, show_teams, add_points, mute, givemute, removemute
 
 __all__ = [
     "start",
@@ -12,4 +12,7 @@ __all__ = [
     "split_groups",
     "show_teams",
     "add_points",
+    "mute",
+    "givemute",
+    "removemute",
 ]
