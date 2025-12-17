@@ -6,11 +6,6 @@ from src.commands.utils import require_group, require_admin
 
 @require_group
 async def show_scores(update: Update, context: ContextTypes.DEFAULT_TYPE, force: bool = False) -> None:
-    """Display the current leaderboard with team and individual scores.
-
-    Args:
-        force: If True, bypass the admin check
-    """
     if not force and not await require_admin(update, context):
         return
 
@@ -45,7 +40,7 @@ async def show_scores(update: Update, context: ContextTypes.DEFAULT_TYPE, force:
 
     team_lines = ["👥 Team Scores"]
     for label, pts in sorted(team_scores.items(), key=lambda item: item[1], reverse=True):
-        team_lines.append(f"Team {name_map.get(label, label)}: {pts} pts")
+        team_lines.append(f"{name_map.get(label, label)}: {pts} pts")
 
     # Calculate individual scores
     medals = {0: "🥇", 1: "🥈", 2: "🥉"}
@@ -57,7 +52,7 @@ async def show_scores(update: Update, context: ContextTypes.DEFAULT_TYPE, force:
         badge = medals.get(idx, f"#{idx + 1}")
         team_label = _team_for(user_id)
         display = name_map.get(team_label, team_label)
-        entries.append(f"{badge}  {user_name} [Team {display}] — {points} pts")
+        entries.append(f"{badge}  {user_name} [{display}] — {points} pts")
 
     board = ["🏆 Leaderboard 🏆", "\n".join(team_lines), "\n".join(entries)]
     await update.message.reply_text("\n\n".join(board))

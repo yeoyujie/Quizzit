@@ -72,3 +72,65 @@ async def show_teams(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         _format_team(name_b, teams.get("B", [])),
     ]
     await update.message.reply_text("\n\n".join(board))
+
+
+@require_group
+async def add_points(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin(update, context):
+        return
+
+    message = update.message
+    if not message or not message.text:
+        return
+
+    parts = message.text.strip().split()
+    if len(parts) < 3:
+        await message.reply_text("Usage: /add <team> <points>  e.g. /add a 10")
+        return
+
+    team_token = parts[1].strip()
+    pts_token = parts[2].strip()
+
+    try:
+        points = int(pts_token)
+    except ValueError:
+        await message.reply_text(f"Invalid points value: {pts_token}")
+        return
+
+    quiz = context.chat_data.get("quiz", {})
+    teams = quiz.get("teams") if quiz else None
+    if not teams:
+        await message.reply_text(
+            "No teams yet. Use /group to split the current players."
+        )
+        return
+
+    label = None
+    token_up = team_token.upper()
+    if token_up in teams:
+        label = token_up
+    else:
+        name_a = context.bot_data.get("TEAM_NAME_A", "A").lower()
+        name_b = context.bot_data.get("TEAM_NAME_B", "B").lower()
+        if team_token.lower() == name_a:
+            label = "A"
+        elif team_token.lower() == name_b:
+            label = "B"
+
+    if not label:
+        await message.reply_text(f"Unknown team: {team_token}")
+        return
+
+    members = teams.get(label, [])
+    if not members:
+        await message.reply_text(f"Team {label} has no members to score.")
+        return
+
+    team_scores = quiz.setdefault("team_scores", {})
+    team_scores[label] = team_scores.get(label, 0) + points
+
+    display_name = context.bot_data.get(f"TEAM_NAME_{label}", label)
+    sign = "+" if points >= 0 else ""
+    await message.reply_text(
+        f"{display_name} {sign}{points} pts added to team {label} (team total: {team_scores[label]} pts)."
+    )
