@@ -28,11 +28,13 @@ async def split_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     quiz = context.chat_data.setdefault("quiz", {})
     quiz.pop("teams", None)
     players = context.chat_data.get("players", {})
-    logger.info(f"Known players: {players}")
+    logger.info("Known players:")
+    for user_id, player in players.items():
+        logger.info("  - %s (%s)", player.get("name"), user_id)
 
-    if len(players) < 2:
+    if len(players) < 1:
         await update.message.reply_text(
-            "Need at least 2 known players to form teams. Have everyone send a message first."
+            "Need at least 1 known player to form teams. Have someone send a message first."
         )
         return
 
@@ -41,9 +43,13 @@ async def split_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     pairs = list(players.items())
     random.shuffle(pairs)
-    mid = len(pairs) // 2
-    team_a = pairs[:mid]
-    team_b = pairs[mid:]
+    if len(pairs) == 1:
+        team_a = pairs
+        team_b = []
+    else:
+        mid = len(pairs) // 2
+        team_a = pairs[:mid]
+        team_b = pairs[mid:]
     quiz["teams"] = {"A": team_a, "B": team_b}
 
     quiz.setdefault("mute_enabled", {"A": False, "B": False})
