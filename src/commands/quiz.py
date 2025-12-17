@@ -263,7 +263,12 @@ async def send_question(
 
     try:
         logger.info(f"Question {idx + 1} content: {question_text}")
-        full_message = f"*QUESTION {idx + 1}*\n\n{question_text}"
+        tags = question_data.get("tags") or []
+        if tags:
+            tags_text = ", ".join(tags)
+            full_message = f"*QUESTION {idx + 1}*\n\n{question_text}\n\n_Genre: {tags_text}_"
+        else:
+            full_message = f"*QUESTION {idx + 1}*\n\n{question_text}"
 
         if file_path and question_type in {"image", "audio", "video"}:
             await _send_question_media_with_caption(
