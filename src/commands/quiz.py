@@ -309,6 +309,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "index": 0,
         "scores": {},
         "answered": False,
+        "last_winning_team": None,
+        "winning_streak": 0,
     }
     if preserved_teams is not None:
         new_quiz["teams"] = preserved_teams
@@ -463,9 +465,30 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"score now {scores[user_id]}"
     )
 
-    # Announce correct answer
+    # Determine the answering user's team (if teams exist) and update streak
+    teams = quiz.get("teams", {})
+    label = "?"
+    if teams:
+        for lab, members in teams.items():
+            if any(uid == user_id for uid, _ in members):
+                label = lab
+                break
+
+    last_label = quiz.get("last_winning_team")
+    if label == last_label:
+        quiz["winning_streak"] = quiz.get("winning_streak", 0) + 1
+    else:
+        quiz["winning_streak"] = 1
+        quiz["last_winning_team"] = label
+
+    display_name = context.bot_data.get(
+        f"TEAM_NAME_{label}", label) if label and label != "?" else "?"
+
     await message.reply_text(
-        f"*{answer}* is correct!\n\n{name} *+{points}*\n_answered in {elapsed:.1f}s_",
+        f"*{answer}* is correct!\n\n"
+        f"{name} *+{points}*\n"
+        f"_answered in {elapsed:.1f}s_\n\n"
+        f"{display_name} streak🔥: {quiz.get('winning_streak', 0)}",
         parse_mode="Markdown"
     )
 

@@ -11,6 +11,7 @@ from src.commands import (
     show_scores,
     split_groups,
     show_teams,
+    add_points,
 )
 from src.commands.utils import seen_message
 
@@ -38,6 +39,7 @@ def main() -> None:
 
     # Register command handlers
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("add", add_points))
     app.add_handler(CommandHandler("scores", show_scores))
     app.add_handler(CommandHandler("hint", hint))
     app.add_handler(CommandHandler("group", split_groups))

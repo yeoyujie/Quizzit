@@ -8,6 +8,7 @@ from src.commands.utils import require_group, require_admin
 
 logger = logging.getLogger(__name__)
 
+
 def _format_team(display_name: str, members: list[tuple[int, str]]) -> str:
     lines = [f"Team {display_name} ({len(members)}):"]
     for _, name in members:
@@ -90,6 +91,8 @@ async def add_points(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     team_token = parts[1].strip()
     pts_token = parts[2].strip()
+
+    logger.info(f"Adding points: team={team_token}, points={pts_token}")
 
     try:
         points = int(pts_token)
