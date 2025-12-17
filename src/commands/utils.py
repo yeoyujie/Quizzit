@@ -37,11 +37,17 @@ async def require_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> b
         logger.info(
             f"Non-admin attempted restricted command in chat {update.effective_chat.id}"
         )
-        if update.message:
+
+        if user:
             try:
-                await update.message.reply_text("Only the admin can run this command.")
-            except Exception:
-                pass
+                await context.bot.send_message(
+                    chat_id=user.id,
+                    text=f"You do not have permission to run this command in *{update.effective_chat.title}*.",
+                    parse_mode="Markdown"
+                )
+                logger.info(f"Sent permission denial DM to user {user.id}")
+            except Exception as e:
+                logger.info(f"Failed to DM user {user.id}: {e}")
         return False
     return True
 
@@ -64,7 +70,8 @@ async def seen_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """
     try:
         record_user(update, context)
-        logger.debug(f"Recorded seen user for chat {update.effective_chat.id if update.effective_chat else 'unknown'}")
+        logger.debug(
+            f"Recorded seen user for chat {update.effective_chat.id if update.effective_chat else 'unknown'}")
     except Exception:
         logger.exception("Failed to record seen user")
 

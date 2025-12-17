@@ -12,6 +12,9 @@ from src.commands import (
     split_groups,
     show_teams,
     add_points,
+    enabledouble,
+    disabledouble,
+    showtags,
     mute,
     givemute,
     removemute
@@ -47,6 +50,9 @@ def main() -> None:
     app.add_handler(CommandHandler("hint", hint))
     app.add_handler(CommandHandler("group", split_groups))
     app.add_handler(CommandHandler("team", show_teams))
+    app.add_handler(CommandHandler("givedouble", enabledouble))
+    app.add_handler(CommandHandler("removedouble", disabledouble))
+    app.add_handler(CommandHandler("showtags", showtags))
     app.add_handler(CommandHandler("mute", mute))
     app.add_handler(CommandHandler("givemute", givemute))
     app.add_handler(CommandHandler("removemute", removemute))

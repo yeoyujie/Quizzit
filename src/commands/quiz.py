@@ -306,6 +306,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     preserved_mute_uses = existing_quiz.get("mute_uses")
     preserved_muted_team = existing_quiz.get("muted_team")
     preserved_muted_until = existing_quiz.get("muted_until")
+    preserved_double_tags = existing_quiz.get("double_tags")
 
     # Store all quiz state under a single `quiz` namespace
     new_quiz = {
@@ -326,6 +327,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         new_quiz["muted_team"] = preserved_muted_team
     if preserved_muted_until is not None:
         new_quiz["muted_until"] = preserved_muted_until
+    if preserved_double_tags is not None:
+        new_quiz["double_tags"] = preserved_double_tags
 
     context.chat_data["quiz"] = new_quiz
 
@@ -334,7 +337,41 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Get ready to test your knowledge! 🧠\n"
         "💡 *Type your answers quickly!*"
     )
-    await update.effective_message.reply_text(start_message, parse_mode="Markdown")
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=start_message, parse_mode="Markdown")
+
+    try:
+        name_a = context.bot_data.get("TEAM_NAME_A", "A")
+        name_b = context.bot_data.get("TEAM_NAME_B", "B")
+
+        mute_enabled = new_quiz.get("mute_enabled", {})
+        mute_uses = new_quiz.get("mute_uses", {})
+        double_tags = new_quiz.get("double_tags", {})
+
+        a_mute_enabled = mute_enabled.get("A", False)
+        b_mute_enabled = mute_enabled.get("B", False)
+        a_mute_uses = mute_uses.get("A", 0)
+        b_mute_uses = mute_uses.get("B", 0)
+
+        a_tags = sorted(list(double_tags.get("A", set()))
+                        ) if double_tags else []
+        b_tags = sorted(list(double_tags.get("B", set()))
+                        ) if double_tags else []
+
+        status_text = (
+            "*📊 Current Team Settings*\n\n"
+            f"*{name_a}*\n"
+            f"• 🔇 Mute: _{'Enabled' if a_mute_enabled else 'Disabled'}_\n"
+            f"• 🔢 Uses left: `{a_mute_uses}`\n"
+            f"• 🏷️ Tags: _{', '.join(a_tags) if a_tags else 'none'}_\n\n"
+            f"*{name_b}*\n"
+            f"• 🔇 Mute: _{'Enabled' if b_mute_enabled else 'Disabled'}_\n"
+            f"• 🔢 Uses left: `{b_mute_uses}`\n"
+            f"• 🏷️ Tags: _{', '.join(b_tags) if b_tags else 'none'}_"
+        )
+
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=status_text, parse_mode="Markdown")
+    except Exception:
+        logger.info("Failed to send team status on start")
 
     wait_seconds = context.bot_data.get("QUIZ_DELAY_SECONDS", 0)
     await countdown_timer(
@@ -502,6 +539,29 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     now_ts = monotonic()
     elapsed = max(0.0, now_ts - start_ts) if start_ts else 0.0
     points = quiz.get("current_points") or _points_for_elapsed(elapsed)
+
+    teams = quiz.get("teams", {})
+    double_tags = quiz.get("double_tags", {})
+    try:
+        user_label = None
+        if teams:
+            for lab, members in teams.items():
+                if any(uid == user_id for uid, _ in members):
+                    user_label = lab
+                    break
+
+        team_double_set = set()
+        if user_label and double_tags:
+            team_double_set = set(double_tags.get(user_label, set()))
+
+        question_tags = set(current.get("tags", [])) if current else set()
+        matched = question_tags & team_double_set
+        if matched:
+            points = points * 2
+            logger.info(
+                f"Doubling points for user {user_id} (team {user_label}) for tags {matched}")
+    except Exception:
+        logger.exception("Error applying double-tags multiplier")
 
     context.bot_data[user_id] = name
     scores = quiz.setdefault("scores", {})

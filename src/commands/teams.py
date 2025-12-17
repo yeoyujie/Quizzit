@@ -1,6 +1,7 @@
 import random
 import logging
 import asyncio
+import re
 from time import monotonic
 
 from telegram import Update
@@ -276,6 +277,137 @@ async def removemute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     logger.info(
         f"/removemute: disabled mute for label={label} (display={display_name})")
     await message.reply_text(f"{display_name} can no longer use /mute.")
+
+
+@require_group
+async def enabledouble(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Enable double-points for a team for questions with a specific tag."""
+    if not await require_admin(update, context):
+        return
+
+    message = update.message
+    if not message or not message.text:
+        return
+
+    parts = message.text.strip().split()
+    if len(parts) < 3:
+        await message.reply_text("Usage: /enabledouble <team> <tag>  e.g. /enabledouble a brand")
+        return
+
+    token = parts[1].strip()
+    tag = parts[2].strip()
+
+    quiz = context.chat_data.setdefault("quiz", {})
+    teams = quiz.get("teams")
+    if not teams:
+        await message.reply_text("No teams yet. Use /group to split the current players.")
+        return
+
+    token_norm = token.lower()
+    label = None
+    if token_norm in ("a", "b"):
+        label = token_norm.upper()
+    else:
+        name_a = context.bot_data.get("TEAM_NAME_A", "A").lower()
+        name_b = context.bot_data.get("TEAM_NAME_B", "B").lower()
+        if token_norm == name_a:
+            label = "A"
+        elif token_norm == name_b:
+            label = "B"
+
+    if not label:
+        await message.reply_text(f"Unknown team: {token}")
+        return
+
+    double_tags = quiz.setdefault("double_tags", {"A": set(), "B": set()})
+    # ensure sets exist for labels
+    double_tags.setdefault("A", set())
+    double_tags.setdefault("B", set())
+
+    double_tags[label].add(tag)
+
+    display_name = context.bot_data.get(f"TEAM_NAME_{label}", label)
+    logger.info(f"/enabledouble: enabled double for label={label} tag={tag}")
+    await message.reply_text(f"{display_name} will now receive double points for questions tagged '{tag}'.")
+
+
+@require_group
+async def disabledouble(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Disable double-points for a team for a specific tag."""
+    if not await require_admin(update, context):
+        return
+
+    message = update.message
+    if not message or not message.text:
+        return
+
+    parts = message.text.strip().split()
+    if len(parts) < 3:
+        await message.reply_text("Usage: /disabledouble <team> <tag>  e.g. /disabledouble a brand")
+        return
+
+    token = parts[1].strip()
+    tag = parts[2].strip()
+
+    quiz = context.chat_data.get("quiz", {})
+    teams = quiz.get("teams") if quiz else None
+    if not teams:
+        await message.reply_text("No teams yet. Use /group to split the current players.")
+        return
+
+    token_norm = token.lower()
+    label = None
+    if token_norm in ("a", "b"):
+        label = token_norm.upper()
+    else:
+        name_a = context.bot_data.get("TEAM_NAME_A", "A").lower()
+        name_b = context.bot_data.get("TEAM_NAME_B", "B").lower()
+        if token_norm == name_a:
+            label = "A"
+        elif token_norm == name_b:
+            label = "B"
+
+    if not label:
+        await message.reply_text(f"Unknown team: {token}")
+        return
+
+    double_tags = quiz.setdefault("double_tags", {"A": set(), "B": set()})
+    double_tags.setdefault("A", set())
+    double_tags.setdefault("B", set())
+
+    if tag in double_tags.get(label, set()):
+        double_tags[label].discard(tag)
+        display_name = context.bot_data.get(f"TEAM_NAME_{label}", label)
+        logger.info(
+            f"/disabledouble: disabled double for label={label} tag={tag}")
+        await message.reply_text(f"{display_name} will no longer receive double points for questions tagged '{tag}'.")
+    else:
+        await message.reply_text(f"Team {label} did not have double-points enabled for tag '{tag}'.")
+
+
+@require_group
+async def showtags(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await require_admin(update, context):
+        return
+
+    user = update.effective_user
+    if not user:
+        return
+
+    quiz = context.chat_data.get("quiz", {})
+    double_tags = quiz.get("double_tags", {})
+
+    a_tags = sorted(list(double_tags.get("A", set())))
+    b_tags = sorted(list(double_tags.get("B", set())))
+
+    msg_lines = ["Current tag assignments:",
+                 f"Team A: {', '.join(a_tags) if a_tags else '(none)'}", f"Team B: {', '.join(b_tags) if b_tags else '(none)'}"]
+
+    try:
+        await context.bot.send_message(chat_id=user.id, text="\n".join(msg_lines))
+        logger.info(f"/showtags: sent double-tag mappings to user {user.id}")
+    except Exception:
+        logger.info(f"Could not DM user {user.id} the tag mappings.")
 
 
 @require_group
