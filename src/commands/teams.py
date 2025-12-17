@@ -156,19 +156,31 @@ async def givemute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     parts = message.text.strip().split()
-    if len(parts) < 2:
-        await message.reply_text("Usage: /givemute <team>  e.g. /givemute a")
+    if len(parts) < 3:
+        await message.reply_text("Usage: /givemute <team> <count>  e.g. /givemute a 3")
         return
 
     token = parts[1].strip()
+    raw = parts[2].strip()
+
+    try:
+        count = int(raw)
+    except ValueError:
+        await message.reply_text(f"Invalid count value: {raw}. Provide a positive integer.")
+        return
+
+    if count <= 0:
+        await message.reply_text(f"Count must be positive: {raw}.")
+        return
 
     quiz = context.chat_data.setdefault("quiz", {})
     teams = quiz.get("teams")
     if not teams:
         await message.reply_text("No teams yet. Use /group to split the current players.")
         return
+
     # Resolve token to internal label 'A' or 'B'
-    token_norm = token.strip().lower()
+    token_norm = token.lower()
     label = None
     if token_norm in ("a", "b"):
         label = token_norm.upper()
@@ -189,13 +201,14 @@ async def givemute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     mute_enabled = quiz.setdefault("mute_enabled", {})
     mute_uses = quiz.setdefault("mute_uses", {})
     mute_enabled[label] = True
-    mute_uses[label] = 3
+    mute_uses[label] = count
 
     display_name = context.bot_data.get(f"TEAM_NAME_{label}", label)
     logger.info(
         f"/givemute: enabled mute for label={label} (display={display_name})")
-    await message.reply_text(f"{display_name} can now use /mute (3 uses for the team this game).")
-    # Ensure other team has explicit default keys too
+    await message.reply_text(
+        f"{display_name} can now use /mute ({mute_uses[label]} uses for the team this game)."
+    )
     other = "A" if label == "B" else "B"
     mute_enabled.setdefault(other, False)
     mute_uses.setdefault(other, 0)
