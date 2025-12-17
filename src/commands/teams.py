@@ -29,8 +29,8 @@ async def split_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     quiz.pop("teams", None)
     players = context.chat_data.get("players", {})
     logger.info("Known players:")
-    for user_id, player in players.items():
-        logger.info("  - %s (%s)", player.get("name"), user_id)
+    for user_id, name in players.items():
+        logger.info("  - %s (%s)", name, user_id)
 
     if len(players) < 1:
         await update.message.reply_text(

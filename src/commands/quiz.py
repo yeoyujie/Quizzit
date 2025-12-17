@@ -594,14 +594,43 @@ async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     display_name = context.bot_data.get(
         f"TEAM_NAME_{label}", label) if label and label != "?" else "?"
+    streak = quiz.get("winning_streak", 1)
 
-    await message.reply_text(
-        f"*{answer}* is correct!\n\n"
-        f"{name} *+{points}*\n"
-        f"_answered in {elapsed:.1f}s_\n\n"
-        f"{display_name} streak {quiz.get('winning_streak', 0)}🔥",
-        parse_mode="Markdown"
-    )
+    if label and label != "?" and streak >= 1:
+        if streak >= 5:
+            team_line = f"*{display_name} IS UNSTOPPABLE! {streak} WINS!* 💥"
+        elif streak >= 3:
+            team_line = f"*{display_name} IS ON FIRE! {streak} 🔥 STREAK!* "
+        else:
+            team_line = f"{display_name} is on a {streak} 🔥 streak!"
+    else:
+        team_line = ""
+
+    reply_lines = [
+        f"*{answer}* is correct!",
+        "",
+        f"{name} *+{points}*",
+        f"_answered in {elapsed:.1f}s_",
+    ]
+    if team_line:
+        reply_lines.extend(["", team_line])
+
+    await message.reply_text("\n".join(reply_lines), parse_mode="Markdown")
+
+    try:
+        # Only send taunts on exact streak milestones: 3 or 5
+        if label and label != "?" and streak in (3, 5):
+            other_label = "A" if label == "B" else "B"
+            display_other = context.bot_data.get(
+                f"TEAM_NAME_{other_label}", other_label)
+            if streak == 5:
+                taunt = f"{display_other}, you guys are getting COOKED! 🥵"
+            else:
+                taunt = f"Uh oh {display_other}, {display_name} is finding their rhythm! 🕺"
+
+            await context.bot.send_message(chat_id=update.effective_chat.id, text=taunt)
+    except Exception:
+        logger.exception("Failed sending taunt to opposing team")
 
     wait_seconds = context.bot_data.get("QUIZ_DELAY_SECONDS", 0)
     await countdown_timer(
